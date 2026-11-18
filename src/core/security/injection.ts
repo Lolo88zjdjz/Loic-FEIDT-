@@ -20,9 +20,26 @@ export function detectInjection(text: string): string[] {
   return SUSPICIOUS.filter((re) => re.test(text)).map((re) => re.source);
 }
 
+/**
+ * Neutralisation : les phrases contenant un motif d'injection connu sont
+ * remplacées par un marqueur AVANT d'atteindre le modèle. Indispensable avec
+ * les petits modèles locaux, qui suivent souvent ces instructions (mesuré :
+ * voir docs/FREE_MODELS_REPORT.md). Une formulation inédite peut passer : les
+ * vraies barrières restent les permissions d'outils et les approbations.
+ */
+export function neutralizeInjections(text: string): { text: string; removed: number } {
+  let removed = 0;
+  const out = text.split(/(?<=[.!?\n])\s*/).map((sentence) => {
+    if (SUSPICIOUS.some((re) => re.test(sentence))) { removed++; return "[instruction suspecte supprimée par SENTINEL]"; }
+    return sentence;
+  }).join(" ");
+  return { text: out, removed };
+}
+
 export function wrapUntrusted(kind: string, sourceLabel: string, text: string): string {
   const flags = detectInjection(text);
-  const safe = text.replaceAll("</untrusted_data>", "</untrusted_data_escaped>");
+  const { text: clean } = flags.length ? neutralizeInjections(text) : { text };
+  const safe = clean.replaceAll("</untrusted_data>", "</untrusted_data_escaped>");
   return [
     `<untrusted_data kind="${kind}" source="${sourceLabel.replaceAll('"', "'")}"${flags.length ? ` injection_suspected="true"` : ""}>`,
     safe,

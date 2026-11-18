@@ -73,12 +73,12 @@ export async function runPluginAudit(ownerId: string) {
       cost: "0 $ (déterministe)", verificationSource: "Registre interne src/core/agents/tools.ts", verifiedAt: now });
   }
 
-  const hasKey = Boolean(process.env.ANTHROPIC_API_KEY);
+  const hasKey = Boolean(process.env.LOIC_OS_ANTHROPIC_API_KEY);
   rows.push({ id: "anthropic:web_search_20260209", name: "Web search (outil serveur Anthropic)", kind: "anthropic_server_tool", provider: "Anthropic", installedVersion: hasKey ? "web_search_20260209" : null,
     function: "Recherche web avec sources, exécutée par l'API Claude", status: hasKey ? "installed" : "available", permissions: ["réseau externe (lecture)"],
     beneficiaryAgents: AGENTS.filter((a) => a.tools.includes("web_search")).map((a) => a.id), risks: "Contenu web non fiable (encapsulé comme donnée)",
-    cost: "Facturé à l'usage par Anthropic en plus des tokens (voir la tarification officielle)", compatibility: "Sonnet 5.5 / Opus 5.5 (registre) ; nécessite ANTHROPIC_API_KEY",
-    recommendation: hasKey ? null : "Indispensable pour ATHENA (veille stages, recherche d'entreprises). Requiert une clé API.", verificationSource: "Documentation Claude API (référence intégrée, 2026-11-03)", verifiedAt: now });
+    cost: "Facturé à l'usage par Anthropic en plus des tokens (voir la tarification officielle)", compatibility: "Sonnet 5.5 / Opus 5.5 (registre) ; nécessite LOIC_OS_ANTHROPIC_API_KEY ET la politique « payant autorisé »",
+    recommendation: hasKey ? null : "Seule option de recherche web actuellement intégrée : payante, facultative. En mode gratuit, ATHENA et la veille stages restent limitées aux données internes.", verificationSource: "Documentation Claude API (référence intégrée, 2026-11-03)", verifiedAt: now });
 
   // Intégrations candidates : listées seulement si le paquet officiel existe réellement.
   const candidates: { pkg: string; name: string; fn: string; agents: string[]; perms: string[]; why: string; alt: string }[] = [

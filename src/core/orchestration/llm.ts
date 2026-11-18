@@ -1,181 +1,187 @@
 /**
- * Exécution LLM d'un agent (API Anthropic, boucle d'outils manuelle afin que
- * CHAQUE appel passe par SENTINEL et soit journalisé). Actif uniquement si
- * ANTHROPIC_API_KEY est défini pour l'application.
+ * Exécution d'un agent par un modèle de langage, QUEL QUE SOIT le fournisseur
+ * (Ollama local, quota gratuit, Anthropic facultatif). La boucle d'outils est
+ * gérée ici pour que chaque appel passe par SENTINEL et soit journalisé.
  *
- * Optimisations : préfixe système stable mis en cache (cache_control), outils
- * dans un ordre déterministe, contexte mémoire ciblé, sorties d'outils
- * compressées, plafonds d'étapes/coût/délégation, repli serveur en cas de refus.
+ * Garanties :
+ *  - le modèle est choisi par TOKEN MASTER parmi les modèles autorisés par la
+ *    politique de coût (par défaut : 100 % gratuit) ;
+ *  - tout appel passe par `callModel`, qui bloque un modèle payant non autorisé ;
+ *  - un échec ne déclenche un repli que vers un autre modèle AUTORISÉ ;
+ *  - les limites (modèle local, pas de web…) sont déclarées dans la réponse.
  */
-import Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
-import { db, schema } from "../db/client";
 import { eq } from "drizzle-orm";
+import { db, schema } from "../db/client";
 import { SECURITY_RULES } from "../agents/definitions";
 import { TOOL_MAP } from "../agents/tools";
 import { UNTRUSTED_DATA_RULE, wrapUntrusted } from "../security/injection";
 import { computeCost } from "../model-router/pricing";
-import { chooseModel, escalate, getMode, unavailableModels, budgetState, type TaskProfile, type Tier } from "../model-router/router";
+import { budgetState, getMode, modelCandidates, requirementsFor, selectModel, type Candidate, type ModelChoice, type TaskProfile, type Tier } from "../model-router/router";
 import { selectContextForAgent } from "../memory/service";
+import { callModel, getCostPolicy, providerById } from "../llm/registry";
+import { ProviderError, type ChatMessage, type ToolSpec } from "../llm/types";
+import { QUALITY_LABEL } from "../llm/quality";
 import { addStep, executeTool, finishRun, getAgent, LIMITS, startRun, type AgentRecord } from "./engine";
 import type { Sensitivity } from "../shared";
 
-export const llmAvailable = () => Boolean(process.env.ANTHROPIC_API_KEY);
-
-let client: Anthropic | null = null;
-function anthropic() {
-  if (!client) client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, maxRetries: 2, timeout: 120_000 });
-  return client;
-}
-
 const MAX_TOOL_RESULT_CHARS = 6000;
-const compress = (v: unknown) => {
-  const s = JSON.stringify(v);
-  return s.length > MAX_TOOL_RESULT_CHARS ? s.slice(0, MAX_TOOL_RESULT_CHARS) + `… [tronqué : ${s.length} caractères]` : s;
-};
+const compress = (v: unknown, max = MAX_TOOL_RESULT_CHARS) => { const s = JSON.stringify(v); return s.length > max ? s.slice(0, max) + `… [tronqué : ${s.length} caractères]` : s; };
 
-function toolDefinitions(agent: AgentRecord, modelCaps: string[]): Anthropic.Beta.BetaToolUnion[] {
-  const defs: Anthropic.Beta.BetaToolUnion[] = [];
-  for (const name of [...agent.tools].sort()) {
-    if (name === "web_search") {
-      if (modelCaps.includes("web_search_20260209")) defs.push({ type: "web_search_20260209", name: "web_search", max_uses: 3 });
-      continue;
-    }
-    const t = TOOL_MAP.get(name);
-    if (!t) continue;
-    defs.push({ name: t.name, description: `[Niveau ${t.level}] ${t.description}`, input_schema: z.toJSONSchema(t.input, { io: "input" }) as Anthropic.Beta.BetaTool.InputSchema });
-  }
-  if (agent.id === "atlas") {
-    defs.push({ name: "delegate", description: "Délègue une sous-tâche précise à un agent spécialisé (nexus, dealmaker, scholar, athena, vital, nutri, nomad, capital, flow, wordsmith, oracle, plugin_architect, token_master). Maximum 3 délégations.",
-      input_schema: { type: "object", properties: { agent: { type: "string" }, objective: { type: "string" } }, required: ["agent", "objective"], additionalProperties: false } });
-  }
-  return defs;
+const SMALL_MODEL_RULES = "Tu es un petit modèle exécuté localement. Réponds en français, brièvement. Si tu n'es pas certain d'un fait, dis-le clairement au lieu de deviner. Utilise les outils pour toute donnée personnelle (mémoire, CRM, tâches) au lieu de l'inventer. Ne décris jamais une personne, une entreprise ou une association que tu ne trouves ni dans le contexte ni via un outil.";
+
+/** Y a-t-il au moins un modèle autorisé et disponible ? (pas d'appel réseau) */
+export async function llmAvailable(ownerId: string) {
+  const policy = await getCostPolicy(ownerId);
+  const all = await modelCandidates();
+  return all.some((c) => c.enabled && c.availability !== "unavailable" && (c.costClass !== "paid" || policy === "allow_paid") && providerById(c.provider)?.isConfigured());
 }
 
-export type LlmResult = { reply: string; sources: { kind: string; label: string; ref?: string }[]; status: "completed" | "waiting_approval" | "failed"; error?: string };
+function toolSpecs(agent: AgentRecord, choice: ModelChoice, small: boolean): ToolSpec[] {
+  const out: ToolSpec[] = [];
+  for (const name of [...agent.tools].sort()) {
+    if (name === "web_search") continue; // outil serveur Anthropic, passé via `webSearch`
+    const t = TOOL_MAP.get(name); if (!t) continue;
+    out.push({ name: t.name, description: small ? t.description.split(".")[0] : `[Niveau ${t.level}] ${t.description}`, parameters: z.toJSONSchema(t.input, { io: "input" }) as Record<string, unknown> });
+  }
+  // Délégation : réservée aux modèles assez capables (un petit modèle local s'y perd).
+  if (agent.id === "atlas" && !small) out.push({ name: "delegate", description: "Délègue une sous-tâche précise à un agent spécialisé (nexus, dealmaker, scholar, athena, vital, nutri, nomad, capital, flow, wordsmith, oracle, plugin_architect, token_master). Maximum 3 délégations.",
+    parameters: { type: "object", properties: { agent: { type: "string" }, objective: { type: "string" } }, required: ["agent", "objective"], additionalProperties: false } });
+  void choice;
+  return out;
+}
+
+export type LlmResult = { reply: string; sources: { kind: string; label: string; ref?: string }[]; status: "completed" | "waiting_approval" | "failed"; error?: string; model?: string; limitations?: string[] };
 
 export async function runAgentLLM(opts: {
   ownerId: string; agentId: string; objective: string; profile: TaskProfile; conversationId?: string | null;
   history?: { role: "user" | "assistant"; content: string }[]; parentRunId?: string | null; rootRunId?: string | null; depth?: number; runId?: string;
 }): Promise<LlmResult & { runId: string }> {
   const agent = await getAgent(opts.agentId);
-  const mode = await getMode(opts.ownerId);
-  const unavailable = await unavailableModels();
-  let choice = chooseModel({ agentTier: agent.modelTier as Tier, profile: opts.profile, mode, override: agent.modelOverride, unavailable });
+  const [mode, policy, all] = await Promise.all([getMode(opts.ownerId), getCostPolicy(opts.ownerId), modelCandidates()]);
+  const configured = all.filter((c) => providerById(c.provider)?.isConfigured());
+  const req = requirementsFor(agent.modelTier as Tier, opts.profile, mode, true);
+  const picked = selectModel(configured, req, { policy, mode, override: agent.modelOverride, preferLocal: true });
 
   const run = opts.runId
     ? (await db.select().from(schema.agentRuns).where(eq(schema.agentRuns.id, opts.runId)))[0]
-    : await startRun({ ownerId: opts.ownerId, agentId: agent.id, objective: opts.objective, mode: "llm", parentRunId: opts.parentRunId, rootRunId: opts.rootRunId, depth: opts.depth, conversationId: opts.conversationId, modelId: choice.modelId, modelReason: choice.reason.join(" ") });
+    : await startRun({ ownerId: opts.ownerId, agentId: agent.id, objective: opts.objective, mode: "llm", parentRunId: opts.parentRunId, rootRunId: opts.rootRunId, depth: opts.depth, conversationId: opts.conversationId });
+  if ("none" in picked) {
+    await addStep(run.id, { kind: "model_select", agentId: "token_master", summary: "Aucun modèle autorisé disponible", data: { reason: picked.reason } });
+    await finishRun(run.id, "failed", null, { error: "no_model" });
+    return { runId: run.id, reply: "", sources: [], status: "failed", error: "no_model" };
+  }
+  let choice = picked;
   await db.update(schema.agentRuns).set({ mode: "llm", modelId: choice.modelId, modelReason: choice.reason.join(" ") }).where(eq(schema.agentRuns.id, run.id));
-  await addStep(run.id, { kind: "model_select", agentId: "token_master", summary: `${choice.modelId} (effort ${choice.effort})`, data: { reason: choice.reason, mode } });
+  await addStep(run.id, { kind: "model_select", agentId: "token_master", summary: `${choice.modelId} (${choice.costClass}${choice.unmet.length ? ", dégradé" : ""})`, data: { reason: choice.reason, unmet: choice.unmet, mode, policy } });
 
-  const budget = await budgetState(opts.ownerId);
-  if (budget.blocked) {
-    await finishRun(run.id, "failed", null, { error: budget.blocked });
-    return { runId: run.id, reply: `⛔ ${budget.blocked}. Ajustez les plafonds dans Paramètres → Budgets.`, sources: [], status: "failed", error: budget.blocked };
+  if (choice.costClass === "paid") {
+    const budget = await budgetState(opts.ownerId);
+    if (budget.blocked) { await finishRun(run.id, "failed", null, { error: budget.blocked }); return { runId: run.id, reply: `⛔ ${budget.blocked}.`, sources: [], status: "failed", error: budget.blocked }; }
   }
 
-  // Contexte ciblé : seulement les souvenirs autorisés pour cet agent.
   const context = await selectContextForAgent(opts.ownerId, { memoryScopes: agent.memoryScopes, maxSensitivity: agent.maxSensitivity as Sensitivity }, opts.objective, 8);
   await addStep(run.id, { kind: "context", agentId: agent.id, summary: `${context.length} souvenir(s) sélectionné(s)`, data: { memoryIds: context.map((m) => m.id) } });
   const contextBlock = context.length
-    ? `Contexte issu de la mémoire de Loïc (avec dates d'observation) :\n${context.map((m) => `- [${m.id.slice(0, 8)}|${m.category}|observé ${m.observedAt}|${m.confidenceStatus}] ${m.content}`).join("\n")}`
-    : "Aucun souvenir pertinent trouvé en mémoire.";
+    ? `Contexte issu de la mémoire de Loïc (avec dates d'observation) :\n${context.map((m) => `- [${m.category}|observé ${m.observedAt}|${m.confidenceStatus}] ${m.content}`).join("\n")}`
+    : "Aucun souvenir pertinent trouvé en mémoire. Si la question porte sur Loïc, ses projets, ses contacts ou ses organisations, réponds que tu n'as pas cette information dans sa mémoire : n'invente rien.";
 
-  const [modelRow] = await db.select().from(schema.modelDefinitions).where(eq(schema.modelDefinitions.id, choice.modelId));
-  const caps = (modelRow?.capabilities as string[]) ?? [];
-  const system: Anthropic.Beta.BetaTextBlockParam[] = [{ type: "text", text: `${SECURITY_RULES}\n\n${UNTRUSTED_DATA_RULE}\n\n${agent.systemPrompt}`, cache_control: { type: "ephemeral" } }];
-  const tools = toolDefinitions(agent, caps);
-  const messages: Anthropic.Beta.BetaMessageParam[] = [
-    ...(opts.history ?? []).slice(-6).map((h) => ({ role: h.role, content: h.content })),
+  const modelRow = () => all.find((c) => c.id === choice.modelId) as (Candidate & typeof schema.modelDefinitions.$inferSelect) | undefined;
+  const isSmall = () => (modelRow()?.qualityTier ?? 3) <= 2;
+  const system = () => `${SECURITY_RULES}\n\n${UNTRUSTED_DATA_RULE}\n\n${agent.systemPrompt}${isSmall() ? `\n\n${SMALL_MODEL_RULES}` : ""}`;
+  const messages: ChatMessage[] = [
+    ...(opts.history ?? []).slice(isSmall() ? -2 : -6).map((h) => ({ role: h.role, content: h.content.slice(0, 2000) }) as ChatMessage),
     { role: "user", content: `${contextBlock}\n\nDate du jour : ${new Date().toISOString().slice(0, 10)}\n\nDemande : ${opts.objective}` },
   ];
-
   const sources: LlmResult["sources"] = context.map((m) => ({ kind: "memory", label: m.content.slice(0, 80), ref: m.id }));
-  let delegations = 0; let waiting = false; let finalText = ""; let runCost = 0;
+  let delegations = 0, waiting = false, finalText = "", runCost = 0, triedFallback = false, groundedByTools = 0;
   const started = Date.now();
-  const fallbackEnabled = process.env.LOIC_OS_REFUSAL_FALLBACK !== "0" && ["claude-opus-5-5", "claude-sonnet-5-5"].includes(choice.modelId);
 
   try {
     for (let step = 0; step < agent.maxSteps; step++) {
-      if (Date.now() - started > LIMITS.maxRunMs) throw new Error("Durée maximale de l'exécution dépassée");
-      const t0 = Date.now();
-      const response = await anthropic().beta.messages.create({
-        model: choice.modelId, max_tokens: 16000, system, tools, messages,
-        output_config: { effort: choice.effort },
-        ...(fallbackEnabled ? { betas: ["server-side-fallback-2026-07-01"], fallbacks: "default" as const } : {}),
-      });
-      const u = response.usage;
-      const usage = { inputTokens: u.input_tokens, outputTokens: u.output_tokens, cacheReadTokens: u.cache_read_input_tokens ?? 0, cacheWriteTokens: u.cache_creation_input_tokens ?? 0 };
-      const servedModel = response.model;
-      const [priceRow] = servedModel === choice.modelId ? [modelRow] : await db.select().from(schema.modelDefinitions).where(eq(schema.modelDefinitions.id, servedModel));
-      const cost = priceRow ? computeCost(usage, priceRow) : { costUsd: 0, status: "partial" as const };
+      if (Date.now() - started > LIMITS.maxRunMs * (choice.costClass === "local" ? 3 : 1)) throw new Error("Durée maximale de l'exécution dépassée");
+      const row = modelRow();
+      const tools = row?.supportsTools ? toolSpecs(agent, choice, isSmall()) : [];
+      let r;
+      try {
+        r = await callModel(opts.ownerId, { id: choice.modelId, provider: choice.provider, costClass: choice.costClass }, {
+          system: system(), messages, tools, maxTokens: choice.costClass === "local" ? 700 : choice.costClass === "paid" ? 16000 : 2000,
+          effort: choice.costClass === "paid" ? choice.effort : undefined, webSearch: req.needsWeb && !!row?.supportsWebSearch,
+        });
+      } catch (e) {
+        // Repli UNIQUEMENT vers un autre modèle autorisé par la politique (jamais payant implicite).
+        const next = choice.fallbacks.find((c) => c.costClass !== "paid" || policy === "allow_paid");
+        if (e instanceof ProviderError && e.retryable && next && !triedFallback) {
+          triedFallback = true;
+          await addStep(run.id, { kind: "error", agentId: agent.id, summary: `${choice.modelId} : ${e.message} → repli sur ${next.id}` });
+          choice = { ...choice, modelId: next.id, provider: next.provider, costClass: next.costClass as ModelChoice["costClass"], fallbacks: choice.fallbacks.filter((c) => c !== next) };
+          step--; continue;
+        }
+        throw e;
+      }
+      const usage = r.usage;
+      const priced = row ? computeCost(usage, row) : { costUsd: 0, status: "partial" as const };
+      const cost = choice.costClass === "paid" ? priced : { costUsd: 0, status: choice.costClass === "local" ? "free_local" : "free_quota" };
       runCost += cost.costUsd;
-      await db.insert(schema.modelUsage).values({ ownerId: opts.ownerId, runId: run.id, agentId: agent.id, modelId: servedModel, workflow: run.workflow, ...usage,
-        costUsd: String(cost.costUsd), costStatus: cost.status, latencyMs: Date.now() - t0, success: response.stop_reason !== "refusal", attempt: step + 1, stopReason: response.stop_reason });
-      await addStep(run.id, { kind: "llm_call", agentId: agent.id, summary: `${servedModel} · ${usage.inputTokens}+${usage.outputTokens} tokens (cache lu ${usage.cacheReadTokens}) · ${cost.costUsd.toFixed(5)} $`, data: { stopReason: response.stop_reason } });
+      await db.insert(schema.modelUsage).values({ ownerId: opts.ownerId, runId: run.id, agentId: agent.id, modelId: r.servedModel, workflow: run.workflow, ...usage,
+        costUsd: String(cost.costUsd), costStatus: cost.status, latencyMs: r.latencyMs, success: r.stopReason !== "refusal", attempt: step + 1, stopReason: r.stopReason });
+      const tps = usage.outputTokens && r.latencyMs ? ` · ${(usage.outputTokens / (r.latencyMs / 1000)).toFixed(1)} tok/s` : "";
+      await addStep(run.id, { kind: "llm_call", agentId: agent.id, summary: `${r.servedModel} · ${usage.inputTokens}+${usage.outputTokens} tokens · ${(r.latencyMs / 1000).toFixed(1)} s${tps} · ${cost.costUsd.toFixed(5)} $`, data: { stopReason: r.stopReason, toolCalls: r.toolCalls.map((t) => t.name) } });
+      for (const w of r.webSources ?? []) sources.push({ kind: "web", label: `${w.title} (${w.date ?? "date inconnue"})`, ref: w.url });
 
-      if (response.stop_reason === "refusal") { finalText = "La demande a été refusée par le modèle (politique de sécurité)."; break; }
-      if (runCost > Number(agent.maxCostUsd)) { finalText = `Budget de l'agent atteint (${runCost.toFixed(4)} $ / ${agent.maxCostUsd} $) : exécution arrêtée.`; break; }
+      if (r.stopReason === "refusal") { finalText = "La demande a été refusée par le modèle (politique de sécurité)."; break; }
+      if (runCost > Number(agent.maxCostUsd)) { finalText = `Budget de l'agent atteint (${runCost.toFixed(4)} $) : exécution arrêtée.`; break; }
+      if (r.stopReason === "pause") { messages.push({ role: "assistant", content: r.text, raw: r.rawAssistant }); continue; }
+      if (r.stopReason !== "tool_use") { finalText = r.text; break; }
 
-      const text = response.content.filter((b): b is Anthropic.Beta.BetaTextBlock => b.type === "text").map((b) => b.text).join("\n");
-      for (const b of response.content) {
-        if (b.type === "web_search_tool_result" && Array.isArray(b.content)) for (const r of b.content) sources.push({ kind: "web", label: `${r.title} (${r.page_age ?? "date inconnue"})`, ref: r.url });
-      }
-      if (response.stop_reason === "pause_turn") { messages.push({ role: "assistant", content: response.content }); continue; }
-      if (response.stop_reason !== "tool_use") {
-        // Escalade unique si la réponse est tronquée (critère vérifiable).
-        if (response.stop_reason === "max_tokens") { const up = escalate(choice, "réponse tronquée (max_tokens)"); if (up && step === 0) { choice = up; continue; } }
-        finalText = text; break;
-      }
-      messages.push({ role: "assistant", content: response.content });
-      const results: Anthropic.Beta.BetaToolResultBlockParam[] = [];
-      for (const b of response.content) {
-        if (b.type !== "tool_use") continue;
-        if (b.name === "delegate") {
-          const inp = b.input as { agent?: string; objective?: string };
+      messages.push({ role: "assistant", content: r.text, toolCalls: r.toolCalls, raw: r.rawAssistant });
+      for (const tc of r.toolCalls) {
+        if (tc.name === "delegate") {
+          const inp = (tc.input ?? {}) as { agent?: string; objective?: string };
           if (delegations >= LIMITS.maxDelegationsPerRun || (run.depth ?? 0) >= LIMITS.maxDepth || !inp.agent || inp.agent === "atlas") {
-            results.push({ type: "tool_result", tool_use_id: b.id, is_error: true, content: "Délégation refusée (limite atteinte ou agent invalide)." }); continue;
+            messages.push({ role: "tool", toolCallId: tc.id, name: tc.name, content: "Délégation refusée (limite atteinte ou agent invalide).", isError: true }); continue;
           }
           delegations++;
           await addStep(run.id, { kind: "delegate", agentId: agent.id, targetAgentId: inp.agent, summary: `→ ${inp.agent} : ${inp.objective?.slice(0, 140)}` });
-          const sub = await runAgentLLM({ ownerId: opts.ownerId, agentId: inp.agent, objective: inp.objective ?? "", profile: opts.profile, parentRunId: run.id, rootRunId: run.rootRunId ?? run.id, depth: (run.depth ?? 0) + 1, conversationId: opts.conversationId }).catch((e) => ({ reply: `Échec de ${inp.agent} : ${(e as Error).message}`, sources: [], status: "failed" as const, runId: "" }));
-          sources.push(...sub.sources);
-          if (sub.status === "waiting_approval") waiting = true;
+          const sub = await runAgentLLM({ ownerId: opts.ownerId, agentId: inp.agent, objective: inp.objective ?? "", profile: opts.profile, parentRunId: run.id, rootRunId: run.rootRunId ?? run.id, depth: (run.depth ?? 0) + 1, conversationId: opts.conversationId })
+            .catch((e) => ({ reply: `Échec de ${inp.agent} : ${(e as Error).message}`, sources: [], status: "failed" as const, runId: "" }));
+          sources.push(...sub.sources); if (sub.status === "waiting_approval") waiting = true;
           await addStep(run.id, { kind: "delegate", agentId: inp.agent, targetAgentId: agent.id, summary: `← ${inp.agent} (${sub.status})` });
-          results.push({ type: "tool_result", tool_use_id: b.id, content: wrapUntrusted("agent_output", inp.agent, sub.reply.slice(0, MAX_TOOL_RESULT_CHARS)) });
+          messages.push({ role: "tool", toolCallId: tc.id, name: tc.name, content: wrapUntrusted("agent_output", inp.agent, sub.reply.slice(0, MAX_TOOL_RESULT_CHARS)) });
           continue;
         }
-        await addStep(run.id, { kind: "tool_call", agentId: agent.id, summary: `${b.name}`, data: { input: b.input } });
-        const out = await executeTool({ ownerId: opts.ownerId, runId: run.id, agent }, b.name, b.input);
+        await addStep(run.id, { kind: "tool_call", agentId: agent.id, summary: tc.name, data: { input: tc.input } });
+        const out = await executeTool({ ownerId: opts.ownerId, runId: run.id, agent }, tc.name, tc.input);
         if (out.status === "waiting_approval") waiting = true;
-        const content = out.status === "ok" ? wrapUntrusted("tool_output", b.name, compress(out.output))
-          : out.status === "waiting_approval" ? `En attente d'approbation utilisateur (id ${out.approvalId}). Ne considère pas l'action comme effectuée.`
-          : out.status === "denied" ? `Refusé par SENTINEL : ${out.reason}` : `Erreur : ${out.error}`;
-        if (out.status === "ok" && b.name === "docs_search") for (const c of out.output as { title: string; documentId: string; page: number | null }[]) sources.push({ kind: "document", label: `${c.title}${c.page ? ` p.${c.page}` : ""}`, ref: c.documentId });
-        results.push({ type: "tool_result", tool_use_id: b.id, content, is_error: out.status !== "ok" && out.status !== "waiting_approval" });
+        if (out.status === "ok") groundedByTools++;
+        if (out.status === "ok" && tc.name === "docs_search") for (const c of out.output as { title: string; documentId: string; page: number | null }[]) sources.push({ kind: "document", label: `${c.title}${c.page ? ` p.${c.page}` : ""}`, ref: c.documentId });
+        messages.push({ role: "tool", toolCallId: tc.id, name: tc.name, isError: out.status === "error" || out.status === "denied",
+          content: out.status === "ok" ? wrapUntrusted("tool_output", tc.name, compress(out.output, isSmall() ? 2500 : MAX_TOOL_RESULT_CHARS))
+            : out.status === "waiting_approval" ? `En attente d'approbation utilisateur (id ${out.approvalId}). Ne considère pas l'action comme effectuée.`
+            : out.status === "denied" ? `Refusé par SENTINEL : ${out.reason}` : `Erreur : ${out.error}` });
       }
-      messages.push({ role: "user", content: results });
-      if (step === agent.maxSteps - 1) finalText = text || "Nombre maximal d'étapes atteint.";
+      if (step === agent.maxSteps - 1) finalText = r.text || "Nombre maximal d'étapes atteint.";
     }
-    const status = waiting ? "waiting_approval" : "completed";
+    const row = modelRow();
+    const limitations = [
+      choice.costClass === "local" ? `Réponse générée localement par ${choice.modelId} (gratuit, niveau ${row?.qualityTier ?? "?"} — ${QUALITY_LABEL[row?.qualityTier ?? 0] ?? ""}) : vérifiez les faits importants.` : null,
+      choice.costClass === "free_quota" ? `Réponse d'un modèle à quota gratuit (${choice.modelId}) : quota limité, conditions de données à vérifier.` : null,
+      ...choice.unmet.map((u) => (u === "pas de recherche web" ? "Aucune recherche web effectuée (aucun modèle gratuit disponible n'en dispose) : informations non actualisées." : `Exigence non satisfaite : ${u}.`)),
+    ].filter(Boolean) as string[];
+    // SENTINEL : une réponse qui ne s'appuie sur AUCUNE donnée (ni souvenir, ni résultat d'outil, ni source web) est signalée.
+    const ungrounded = context.length === 0 && groundedByTools === 0 && !sources.some((x) => x.kind === "web");
+    if (ungrounded) {
+      limitations.unshift("⚠️ Réponse non sourcée : aucune donnée de votre cerveau n'a été trouvée ni consultée. À considérer comme une supposition du modèle, pas comme un fait.");
+      await addStep(run.id, { kind: "validation", agentId: "sentinel", summary: "Réponse non sourcée (aucun souvenir, aucun outil) : étiquetée comme supposition" });
+    }
+    const reply = (finalText.trim() || "(réponse vide du modèle)") + (limitations.length ? `\n\n_${limitations.join(" ")}_` : "");
     await addStep(run.id, { kind: "final", agentId: agent.id, summary: "Réponse finale" });
-    await finishRun(run.id, status, { reply: finalText }, { sources });
-    return { runId: run.id, reply: finalText, sources, status };
+    await finishRun(run.id, waiting ? "waiting_approval" : "completed", { reply }, { sources });
+    return { runId: run.id, reply, sources, status: waiting ? "waiting_approval" : "completed", model: choice.modelId, limitations };
   } catch (e) {
-    const err = e instanceof Anthropic.AuthenticationError ? "Clé API invalide (401)." : e instanceof Anthropic.RateLimitError ? "Limite de débit atteinte (429), réessayez plus tard." : e instanceof Anthropic.APIError ? `Erreur API ${e.status} : ${e.message}` : (e as Error).message;
+    const err = (e as Error).message;
     await addStep(run.id, { kind: "error", agentId: agent.id, summary: err });
     await finishRun(run.id, "failed", null, { error: err });
     return { runId: run.id, reply: `⚠️ ${err}`, sources, status: "failed", error: err };
   }
-}
-
-/** Vérifie la disponibilité réelle des modèles via GET /v1/models (nécessite la clé). */
-export async function verifyModelAvailability() {
-  if (!llmAvailable()) return { checked: false as const, reason: "ANTHROPIC_API_KEY absent" };
-  const ids = new Set<string>();
-  for await (const m of anthropic().models.list()) ids.add(m.id);
-  const rows = await db.select().from(schema.modelDefinitions);
-  for (const r of rows) await db.update(schema.modelDefinitions).set({ availability: ids.has(r.id) ? "available" : "unavailable", availabilityCheckedAt: new Date() }).where(eq(schema.modelDefinitions.id, r.id));
-  return { checked: true as const, available: [...ids] };
 }

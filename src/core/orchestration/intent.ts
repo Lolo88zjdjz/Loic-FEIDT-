@@ -94,7 +94,7 @@ export function route(text: string, forcedAgent?: string | null): Route {
 
 export function profileFor(intent: Intent, text: string): TaskProfile {
   const n = norm(text);
-  const needsWeb = /(cherche|trouve|recherche|offres?|actualit|veille|en ligne|internet)/.test(n) && !/(mes documents|ma memoire|mon cerveau)/.test(n);
+  const needsWeb = /(cherche|trouve|recherche|offres?|actualit|veille|en ligne|internet)/.test(n) && !/(mes documents|ma memoire|mon cerveau|recherche memoire|dans (ma|la) memoire|mon crm)/.test(n);
   const high = /(strateg|arbitr|long terme|architecture|analyse approfondie|toutes? (les )?connexions|tout ce que tu sais)/.test(n) || text.length > 1200;
   const risk = /(envoie|publie|reserve|paye|achete|supprime|installe)/.test(n) ? "high" : "low";
   const simple = ["nutrition_log", "nutrition_day", "task_create", "memory_remember", "overdue", "costs"].includes(intent.kind);

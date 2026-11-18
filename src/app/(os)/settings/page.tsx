@@ -6,7 +6,10 @@ import { db, schema } from "@/core/db/client";
 import { audit } from "@/core/security/audit";
 import { upsertFood } from "@/core/nutrition/service";
 import { hashPassword, verifyCredentials } from "@/core/auth/session";
-import { verifyModelAvailability } from "@/core/orchestration/llm";
+import { syncModelRegistry } from "@/core/llm/registry";
+import { aiStatus, hardwareRecommendation } from "@/core/llm/status";
+import { ANTHROPIC_KEY_ENV } from "@/core/llm/providers/anthropic";
+import { FREE_PRESETS } from "@/core/llm/providers/openai-compatible";
 import { Badge, Card, PageHeader, statusTone } from "@/components/ui";
 
 async function setPref(ownerId: string, key: string, scope: string, value: unknown) {
@@ -37,7 +40,15 @@ async function changePassword(f: FormData) {
   await db.delete(schema.sessions).where(eq(schema.sessions.userId, u.id));
   await audit(db, { ownerId: u.id, actor: "user", action: "auth.password_changed" });
 }
-async function checkModels() { "use server"; await requireUser(); await verifyModelAvailability(); revalidatePath("/settings"); }
+async function checkModels() { "use server"; await requireUser(); await syncModelRegistry(); revalidatePath("/settings"); }
+async function savePolicy(f: FormData) {
+  "use server"; const u = await requireUser();
+  const policy = f.get("policy") === "allow_paid" ? "allow_paid" : "free_only";
+  // Passer en payant exige une confirmation explicite ET une clé dédiée à LOÏC OS.
+  if (policy === "allow_paid" && (f.get("confirm") !== "on" || !process.env[ANTHROPIC_KEY_ENV])) throw new Error("Confirmation explicite et clé LOIC_OS_ANTHROPIC_API_KEY requises pour autoriser les modèles payants.");
+  await setPref(u.id, "ai.cost_policy", "ai", policy);
+  revalidatePath("/settings");
+}
 
 export default async function SettingsPage() {
   const user = await requireUser();
@@ -45,6 +56,8 @@ export default async function SettingsPage() {
   const p = (k: string) => prefs.find((x) => x.key === k)?.value;
   const foods = await db.select().from(schema.foods).where(eq(schema.foods.ownerId, user.id));
   const conns = await db.select().from(schema.integrationConnections).where(eq(schema.integrationConnections.ownerId, user.id));
+  const ai = await aiStatus(user.id);
+  const hw = hardwareRecommendation();
   const procedural = await db.select().from(schema.memories).where(and(eq(schema.memories.ownerId, user.id), eq(schema.memories.type, "procedural"), eq(schema.memories.status, "active")));
   return (
     <>
@@ -61,8 +74,31 @@ export default async function SettingsPage() {
             </div>
             <button className="btn btn-primary" data-testid="save-ai">Enregistrer</button>
           </form>
-          <form action={checkModels} className="mt-3"><button className="btn text-[12px]" disabled={!process.env.ANTHROPIC_API_KEY}>Vérifier la disponibilité des modèles (GET /v1/models)</button></form>
-          <p className="text-[11px] text-faint mt-2">Facturation API Anthropic ≠ abonnement Claude ≠ usage Claude Code : la clé de LOÏC OS est facturée à part, à l&apos;usage. Coûts d&apos;hébergement et d&apos;intégrations tierces non inclus.</p>
+          <p className="text-[11px] text-faint mt-2">Les budgets ne s&apos;appliquent qu&apos;aux modèles payants. Les modèles locaux et à quota gratuit coûtent 0 $.</p>
+        </Card>
+        <Card title="Politique de coût IA" className="lg:col-span-2">
+          <form action={savePolicy} className="space-y-2 text-[13px]">
+            <label className="flex gap-2 items-start"><input type="radio" name="policy" value="free_only" defaultChecked={ai.policy === "free_only"} data-testid="policy-free" /> <span><b>100 % gratuit</b> (défaut) — uniquement des modèles locaux (Ollama) ou à quota gratuit. Aucun appel payant n&apos;est possible, même en cas d&apos;échec : le système se dégrade (recherche dans le cerveau) au lieu de payer.</span></label>
+            <label className="flex gap-2 items-start"><input type="radio" name="policy" value="allow_paid" defaultChecked={ai.policy === "allow_paid"} disabled={!ai.anthropicConfigured} /> <span><b>Payant autorisé</b> — TOKEN MASTER utilise d&apos;abord le moins coûteux capable (gratuit si suffisant), Anthropic seulement si nécessaire, sous budgets. {ai.anthropicConfigured ? "" : <span className="text-faint">(requiert {ANTHROPIC_KEY_ENV})</span>}</span></label>
+            <label className="flex gap-2 items-center text-[12px] text-muted"><input type="checkbox" name="confirm" /> Je comprends que des appels facturés à l&apos;usage deviendront possibles.</label>
+            <button className="btn btn-primary">Enregistrer la politique</button>
+          </form>
+          <div className="grid md:grid-cols-2 gap-4 mt-4">
+            <div>
+              <div className="text-[12px] font-semibold text-muted mb-1">Fournisseurs</div>
+              <ul className="text-[13px] space-y-1">{ai.providers.map((p) => <li key={p.id} className="flex gap-2 items-center"><Badge tone={p.configured ? "ok" : "neutral"}>{p.configured ? "configuré" : "non configuré"}</Badge>{p.label}<span className="text-faint text-[11px]">{p.costClass === "local" ? "0 $ · local" : p.costClass === "free_quota" ? `0 $ · quota · ${FREE_PRESETS.find((x) => x.id === p.id)?.envKey}` : `payant · ${ANTHROPIC_KEY_ENV}`}</span></li>)}</ul>
+              <form action={checkModels} className="mt-2"><button className="btn text-[12px]" data-testid="discover">Détecter les modèles disponibles</button></form>
+              <p className="text-[12px] text-muted mt-2">{ai.local.length} modèle(s) local(aux) · {ai.quota.length} à quota gratuit · {ai.paid.length} payant(s) au catalogue.</p>
+            </div>
+            <div>
+              <div className="text-[12px] font-semibold text-muted mb-1">Modèle local conseillé pour cette machine</div>
+              <p className="text-[13px]">{hw.platform} · {hw.cpus} cœurs · {hw.ramGb} Go RAM → <b>{hw.size}</b>. {hw.note}</p>
+              <p className="text-[11px] text-faint mt-1">{hw.caveat}</p>
+            </div>
+          </div>
+          <div className="mt-4 border border-line rounded-lg p-3 text-[12px] text-muted">
+            <b className="text-fg">Séparation stricte.</b> Votre abonnement Claude Code (utilisé pour <i>développer</i> LOÏC OS) n&apos;est jamais utilisé par l&apos;application : LOÏC OS ne lit que <code>{ANTHROPIC_KEY_ENV}</code>, impose l&apos;URL officielle de l&apos;API et ignore <code>ANTHROPIC_API_KEY</code>, <code>ANTHROPIC_AUTH_TOKEN</code> et <code>ANTHROPIC_BASE_URL</code>. Abonnement Claude ≠ Claude Code ≠ facturation API ≠ hébergement ≠ services tiers.
+          </div>
         </Card>
         <Card title="Sécurité">
           <form action={saveSecurity} className="space-y-2 text-[13px]">
@@ -79,7 +115,7 @@ export default async function SettingsPage() {
         </Card>
         <Card title="Intégrations">
           {conns.map((c) => <div key={c.id} className="flex items-center gap-2 border-t border-line py-1.5 text-[13px]"><Badge tone={statusTone(c.status)}>{c.status}</Badge><span>{c.provider}</span>
-            <span className="text-faint text-[12px] ml-auto">{c.provider === "web_search" ? (process.env.ANTHROPIC_API_KEY ? "via outil serveur Anthropic" : "requiert ANTHROPIC_API_KEY") : "OAuth non implémenté (GOOGLE_CLIENT_ID requis)"}</span></div>)}
+            <span className="text-faint text-[12px] ml-auto">{c.provider === "web_search" ? "via Anthropic uniquement (payant, facultatif) — indisponible en mode gratuit" : "OAuth non implémenté (GOOGLE_CLIENT_ID requis)"}</span></div>)}
           <p className="text-[11px] text-faint mt-2">Les jetons OAuth seront chiffrés en AES-256-GCM (module prêt : src/core/security/crypto.ts).</p>
         </Card>
         <Card title={`Nutrition — base d'aliments (${foods.length})`} className="lg:col-span-2">

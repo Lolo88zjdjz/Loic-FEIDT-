@@ -45,6 +45,7 @@ const S = src.id;
 // ── Préférences ───────────────────────────────────────────────────
 const prefs: [string, string, unknown, string][] = [
   ["ai.optimization_mode", "ai", "BALANCED", "Mode TOKEN MASTER : ECO | BALANCED | MAX_PERFORMANCE"],
+  ["ai.cost_policy", "ai", "free_only", "free_only (défaut) : aucun modèle payant ne peut être appelé | allow_paid : payant autorisé, sous budgets"],
   ["budget.mission_usd", "budget", 0.5, "Plafond par mission (USD)"],
   ["budget.day_usd", "budget", 2, "Plafond journalier (USD)"],
   ["budget.month_usd", "budget", 20, "Plafond mensuel (USD)"],

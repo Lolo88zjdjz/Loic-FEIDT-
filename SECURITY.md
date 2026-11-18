@@ -7,7 +7,7 @@
 | CSRF | Server actions (contrôle d'origine natif de Next.js) ; routes API mutantes : vérification `Origin` = hôte |
 | Niveaux d'action | 1 Lecture · 2 Analyse · 3 Modification interne · 4 Action externe. Liste blanche d'outils par agent + plafond ; niveau 4 ⇒ ApprovalRequest systématique (prévisualisation, expiration 7–14 j, clé d'idempotence, exécution unique) ; niveau 3 destructif ou si l'auto-approbation est désactivée ⇒ approbation ; transactions financières interdites dans le code |
 | SENTINEL | Point de passage unique (`executeTool`) : liste blanche, plafond, validation Zod, approbation, plafond de 12 appels/run, journalisation de chaque invocation, audit des refus |
-| Injection de prompt | Contenus externes (documents, web, sorties d'outils, réponses d'autres agents) encapsulés dans `<untrusted_data>` ; détection de motifs FR/EN signalée à l'import ; règles système jamais construites à partir de contenu externe ; `SECURITY_RULES` ajoutées à chaque appel, non modifiables par feedback |
+| Injection de prompt | Neutralisation des phrases d'injection connues avant envoi au modèle (indispensable : les petits modèles locaux testés obéissent sinon) ; contenus externes (documents, web, sorties d'outils, réponses d'autres agents) encapsulés dans `<untrusted_data>` ; détection de motifs FR/EN signalée à l'import ; règles système jamais construites à partir de contenu externe ; `SECURITY_RULES` ajoutées à chaque appel, non modifiables par feedback |
 | Secrets | Jamais dans les prompts ni la base (clés en variables d'environnement) ; masquage automatique (`redact`) dans l'audit, les étapes et les erreurs ; jetons OAuth prévus chiffrés AES-256-GCM ; l'export exclut mots de passe, chemins et jetons |
 | Données sensibles | Sensibilité par souvenir/nœud/arête ; agents plafonnés ; santé = `sensitive`, accessible au seul VITAL ; graphe : nœuds `sensitive` masqués par défaut |
 | Fichiers | Taille ≤ 20 Mo, nom assaini, stockage par empreinte SHA-256 (mode 600), téléchargement toujours en pièce jointe + `nosniff` ; aucune exécution de contenu |
@@ -23,4 +23,6 @@
 - Mono-utilisateur (pas de rôles multiples).
 - Pas de limitation de débit sur `/login` (à ajouter avant exposition publique).
 - Pas de CSP stricte (le script de thème est inline).
-- Détection d'injection heuristique : la vraie protection est l'encapsulation + le contrôle des outils.
+- Détection d'injection heuristique : une injection formulée autrement **passe** (mesuré : les deux modèles locaux répondent « BANANE »). La vraie protection est structurelle : outils plafonnés, approbation obligatoire des actions externes, aucune action financière.
+- Coûts : garde-fou central contre tout appel payant non autorisé (`assertCallAllowed`).
+- Quotas gratuits cloud : selon les fournisseurs, les données des offres gratuites peuvent être conservées ou réutilisées ; local (Ollama) recommandé pour les données personnelles.

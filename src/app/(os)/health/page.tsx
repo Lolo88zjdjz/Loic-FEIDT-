@@ -5,6 +5,7 @@ import { requireUser } from "@/lib/auth";
 import { db, schema } from "@/core/db/client";
 import { integrityReport } from "@/core/graph/service";
 import { budgetState } from "@/core/model-router/router";
+import { aiStatus } from "@/core/llm/status";
 import { Badge, Card, fmtDate, PageHeader, statusTone, usd } from "@/components/ui";
 
 export default async function HealthPage() {
@@ -23,12 +24,15 @@ export default async function HealthPage() {
   const backupDir = path.join(process.cwd(), "backups");
   const backups = await readdir(backupDir).then(async (f) => Promise.all(f.filter((x) => x.endsWith(".dump") || x.endsWith(".sql.gz")).map(async (x) => ({ name: x, mtime: (await stat(path.join(backupDir, x))).mtime })))).catch(() => []);
   backups.sort((a, b) => b.mtime.getTime() - a.mtime.getTime());
+  const ai = await aiStatus(user.id);
   const services = [
     { name: "PostgreSQL", ok: true, detail: `${pg.v.split(" ").slice(0, 2).join(" ")} · ${dbMs} ms · ${(Number(pg.size) / 1e6).toFixed(1)} Mo` },
     { name: "pgvector", ok: !!pg.vector, detail: pg.vector ? `v${pg.vector} (colonnes prêtes ; embeddings non configurés)` : "absent" },
     { name: "pg_trgm", ok: !!pg.trgm, detail: pg.trgm ? `v${pg.trgm}` : "absent" },
     { name: "Worker (pg-boss)", ok: !!workerAlive, detail: hb ? `dernier signal ${fmtDate(String(hb.value), true)}` : "jamais démarré" },
-    { name: "API Anthropic", ok: !!process.env.ANTHROPIC_API_KEY, detail: process.env.ANTHROPIC_API_KEY ? "clé configurée (non affichée)" : "non configurée → mode déterministe" },
+    { name: "Ollama (local, gratuit)", ok: ai.local.length > 0, detail: ai.local.length ? ai.local.map((m) => m.id).join(", ") : "aucun modèle local détecté" },
+    { name: "Quotas gratuits", ok: ai.quota.length > 0, detail: ai.providers.filter((p) => p.costClass === "free_quota").map((p) => `${p.id} : ${p.configured ? "clé présente" : "non configuré"}`).join(" · ") },
+    { name: "Anthropic (payant, facultatif)", ok: true, detail: `${ai.anthropicConfigured ? "clé LOIC_OS_ANTHROPIC_API_KEY présente" : "non configuré"} · politique : ${ai.policy === "free_only" ? "100 % gratuit (bloqué)" : "payant autorisé"}` },
     { name: "Embeddings", ok: !!process.env.VOYAGE_API_KEY, detail: process.env.VOYAGE_API_KEY ? "clé présente — intégration non implémentée" : "non configurés (recherche plein texte + trigrammes)" },
   ];
   return (

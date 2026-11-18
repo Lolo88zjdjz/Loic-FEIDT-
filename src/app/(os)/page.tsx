@@ -4,6 +4,7 @@ import { requireUser } from "@/lib/auth";
 import { db, schema } from "@/core/db/client";
 import { listProjects, openTasks, eventsBetween } from "@/core/projects/service";
 import { budgetState, getMode } from "@/core/model-router/router";
+import { aiStatus } from "@/core/llm/status";
 import { staleOpportunities } from "@/core/crm/service";
 import BrainGraph from "@/components/BrainGraph";
 import { Badge, Card, Empty, fmtDate, PageHeader, Stat, statusTone, usd } from "@/components/ui";
@@ -28,9 +29,11 @@ export default async function Dashboard() {
   const hour = new Date().getHours();
   const suggestions: string[] = [];
   const llmRuns = runs.filter((r) => r.mode === "llm").length;
-  if (!process.env.ANTHROPIC_API_KEY) suggestions.push("Aucune clé API : toutes les missions passent en mode déterministe (0 $). Ajoutez ANTHROPIC_API_KEY pour les demandes ouvertes, la recherche web et la rédaction.");
+  const ai = await aiStatus(user.id);
+  if (!ai.freeAvailable) suggestions.push("Aucun modèle gratuit disponible : lancez Ollama avec un modèle local (README → IA gratuite) pour les demandes ouvertes. Les intentions reconnues fonctionnent déjà sans IA.");
+  else suggestions.push(`${ai.label}. Politique ${ai.policy === "free_only" ? "100 % gratuit : aucun appel payant possible" : "payant autorisé"}. Limite : pas de recherche web en mode gratuit.`);
   if (budget.monthUsd > budget.limits.monthUsd * 0.8) suggestions.push(`80 % du budget mensuel consommé : passez en mode ECO (actuel : ${mode}).`);
-  if (llmRuns === 0 && process.env.ANTHROPIC_API_KEY) suggestions.push("Aucune donnée LLM mesurée : TOKEN MASTER proposera des optimisations après les premiers appels.");
+  if (llmRuns === 0 && ai.freeAvailable) suggestions.push("Aucune donnée LLM mesurée : TOKEN MASTER proposera des optimisations après les premiers appels.");
   return (
     <>
       <PageHeader title={`${hour < 18 ? "Bonjour" : "Bonsoir"} Loïc`} subtitle={`${new Date().toLocaleDateString("fr-FR", { weekday: "long", day: "numeric", month: "long", year: "numeric" })} — voici votre environnement.`}

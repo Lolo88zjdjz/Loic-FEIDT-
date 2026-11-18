@@ -27,9 +27,15 @@ Second Brain personnel de Loïc. Lire d'abord `IMPLEMENTATION_STATUS.md` (état 
 - Données `sensitive` (santé) : accessibles uniquement aux agents dont `maxSensitivity` = `sensitive`.
 - Ne pas confondre agents LOÏC OS (application) et subagents Claude Code (développement). TOKEN MASTER ne pilote pas le modèle de la session Claude Code.
 
-## API Claude
+## IA : multi-fournisseurs, gratuit par défaut
 
-SDK `@anthropic-ai/sdk`, `client.beta.messages.create` (pour `fallbacks`). Modèles : `claude-haiku-5-5`, `claude-sonnet-5-5`, `claude-opus-5-5` (Fable 5.2 manuel seulement). Pas de `thinking.disabled` ni `budget_tokens` (400) ; contrôle via `output_config.effort`. Pas de `tool_choice` forcé (400 sur Opus/Sonnet 5.5). Outil web : `web_search_20260209`. Vérifier toute évolution dans la documentation officielle avant de modifier `src/core/orchestration/llm.ts`.
+- Tout appel de modèle passe par `callModel` (`src/core/llm/registry.ts`) ; ne jamais appeler un fournisseur directement depuis l'orchestration. Politique `ai.cost_policy` = `free_only` par défaut : aucun appel payant implicite, jamais de repli payant.
+- Fournisseurs : `src/core/llm/providers/` (Ollama, compatibles OpenAI à quota gratuit, Anthropic). L'app lit `LOIC_OS_ANTHROPIC_API_KEY` uniquement : ne jamais utiliser `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_BASE_URL` (ce sont ceux de Claude Code).
+- Mesures réelles : `pnpm llm:eval` → `docs/FREE_MODELS_REPORT.md`.
+
+## API Claude (fournisseur facultatif)
+
+SDK `@anthropic-ai/sdk`, `client.beta.messages.create` (pour `fallbacks`). Modèles : `claude-haiku-5-5`, `claude-sonnet-5-5`, `claude-opus-5-5` (Fable 5.2 manuel seulement). Pas de `thinking.disabled` ni `budget_tokens` (400) ; contrôle via `output_config.effort`. Pas de `tool_choice` forcé (400 sur Opus/Sonnet 5.5). Outil web : `web_search_20260209`. Vérifier toute évolution dans la documentation officielle avant de modifier `src/core/llm/providers/anthropic.ts`.
 
 ## Priorités
 

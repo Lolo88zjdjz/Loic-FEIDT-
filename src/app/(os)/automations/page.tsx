@@ -40,7 +40,7 @@ export default async function AutomationsPage() {
       <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-3 mb-6">
         {autos.map((a) => (
           <div key={a.id} className="card p-4 space-y-2" data-testid="automation">
-            <div className="flex items-center gap-2"><span className="font-semibold">{a.name}</span>{a.requiresLlm && <Badge tone={process.env.ANTHROPIC_API_KEY ? "info" : "warn"}>clé API requise</Badge>}<span className="ml-auto"><Badge tone={a.enabled ? "ok" : "neutral"}>{a.enabled ? "active" : "désactivée"}</Badge></span></div>
+            <div className="flex items-center gap-2"><span className="font-semibold">{a.name}</span>{a.requiresLlm && <Badge tone="warn">recherche web requise</Badge>}<span className="ml-auto"><Badge tone={a.enabled ? "ok" : "neutral"}>{a.enabled ? "active" : "désactivée"}</Badge></span></div>
             <p className="text-[12px] text-muted">{a.description}</p>
             <form action={setCron} className="flex gap-2"><input type="hidden" name="id" value={a.id} /><input name="cron" defaultValue={a.cron} className="input font-mono text-[12px]" /><button className="btn text-[12px]">Planifier</button></form>
             <div className="text-[11px] text-faint">Fuseau {a.timezone} · dernière exécution : {a.lastRunAt ? fmtDate(a.lastRunAt, true) : "jamais"}</div>

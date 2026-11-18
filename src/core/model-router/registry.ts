@@ -3,7 +3,7 @@
  * Claude intégrée à l'environnement de développement (cache daté du
  * 2026-11-03). La DISPONIBILITÉ n'est jamais supposée : elle reste
  * « unverified » tant qu'un appel à GET /v1/models n'a pas réussi avec la clé
- * de l'application (voir verifyModelAvailability).
+ * de l'application (voir syncModelRegistry). Catalogue Anthropic : FACULTATIF et payant.
  */
 export type ModelSeed = {
   id: string; displayName: string; tier: "fast" | "balanced" | "advanced" | "premium";

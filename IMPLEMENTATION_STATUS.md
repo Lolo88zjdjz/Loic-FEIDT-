@@ -1,4 +1,35 @@
-# État d'implémentation — mis à jour le 2026-11-18
+# État d'implémentation — mis à jour le 2026-11-18 (v0.2 : IA gratuite par défaut)
+
+## v0.2 — IA sans dépense obligatoire
+
+| Élément | État | Preuve |
+|---|---|---|
+| Abstraction multi-fournisseurs (`src/core/llm`) | ✅ | Ollama, 4 presets à quota gratuit, Anthropic |
+| Ollama (local) | ✅ testé réellement | qwen2.5:3b et qwen3:1.7b (Q4_K_M) sur 4 cœurs CPU sans GPU |
+| Quotas gratuits (Gemini, Groq, OpenRouter `:free`, Mistral) | 🟡 codé, **non testé** | Aucune clé ; en plus, Groq et OpenRouter sont bloqués par le réseau de ce conteneur |
+| Anthropic facultatif | 🟡 codé, non exécuté | Clé dédiée `LOIC_OS_ANTHROPIC_API_KEY` + politique explicite |
+| Politique « 100 % gratuit » par défaut + garde-fou central | ✅ | tests unitaires + intégration (aucun appel payant, même politique « payant autorisé » sans clé) |
+| TOKEN MASTER : le moins cher qui satisfait les exigences | ✅ | 11 tests unitaires (local d'abord, plus petit suffisant, quota, payant seulement si autorisé et nécessaire, mode dégradé déclaré) |
+| Limites affichées | ✅ | AI Cost Center (coût, niveau, outils, web, contexte, observé, limitations), mention sur chaque réponse, Settings |
+| Séparation Claude Code / APIs LOÏC OS | ✅ | test unitaire : variables `ANTHROPIC_*` ignorées ; bandeau Settings |
+| Bout en bout dans le navigateur | ✅ 28/28 | dont une demande ouverte traitée par qwen2.5:3b (0 $) |
+| Intégration réelle Ollama | ✅ 4/4 | `OLLAMA_DISABLED=0 pnpm vitest run tests/integration/ollama.test.ts` |
+
+### Capacités et limites observées (mesures réelles, ce conteneur)
+
+Banc d'essai : [docs/FREE_MODELS_REPORT.md](docs/FREE_MODELS_REPORT.md), 9 épreuves, **7/9 pour chacun des deux modèles**.
+
+- **Fonctionne bien** : appels d'outils simples (arguments exacts), réponses fondées sur le contexte fourni (prix Haglöfs repris correctement), refus d'inventer une coordonnée absente, extraction JSON, relance courte en français.
+- **Connaissances générales peu fiables** : qwen2.5:3b se trompe sur la VAN (« somme des actifs réduite par les dettes ») ; qwen3:1.7b répond correctement.
+- **Choix d'outil** : qwen3:1.7b n'a pas trouvé l'outil CRM adapté ; qwen2.5:3b oui.
+- **Hallucinations sans contexte** : interrogé sur Altigliss sans aucun souvenir, qwen2.5:3b a inventé une description, malgré les consignes. Parade : SENTINEL étiquette « non sourcée » toute réponse appuyée sur aucune donnée. Avec les vraies données, la réponse sur Altigliss était juste et appuyée sur la mémoire.
+- **Injections** : sans protection, les deux modèles obéissent à « IGNORE ALL PREVIOUS INSTRUCTIONS ». Avec la neutralisation SENTINEL, cette injection-là est bloquée. Une injection formulée autrement passe encore (les deux modèles répondent « BANANE ») : les permissions et approbations restent la vraie barrière.
+- **Vitesse (CPU, 4 cœurs, sans GPU)** : 9–15 tokens/s en génération. Un tour d'agent dans l'application (900–2 000 tokens de prompt) prend **9–14 s**, une mission avec outil environ 20–30 s. Un GPU ou un Mac Apple Silicon accélère nettement.
+- **Pas de recherche web en mode gratuit** : veille stages, ATHENA et PLUGIN ARCHITECT en ligne restent bloqués. La réponse le dit explicitement.
+- **Délégation multi-agents désactivée** pour les modèles de niveau ≤ 2. ATLAS répond lui-même.
+- **Contexte** : 8 192 tokens (paramètre `num_ctx`), suffisant pour un agent avec 12 outils et 8 souvenirs.
+
+
 
 Légende : ✅ implémenté **et testé** · 🟡 implémenté, non testé de bout en bout ou partiel · ⛔ bloqué (dépendance externe) · ⬜ non commencé.
 

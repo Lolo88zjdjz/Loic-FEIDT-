@@ -2,20 +2,15 @@
 import { sql } from "drizzle-orm";
 import { db, schema } from "./db/client";
 import { AGENTS } from "./agents/definitions";
-import { MODEL_SEEDS, PRICING_SOURCE, PRICING_VERIFIED_AT } from "./model-router/registry";
+import { syncModelRegistry } from "./llm/registry";
 import { AUTOMATION_SEEDS } from "./workflows/automations";
 import { link, upsertEntityNode } from "./graph/service";
 import { TOOLS } from "./agents/tools";
 
 export async function syncRegistries(ownerId: string) {
+  // Découverte réelle des modèles (Ollama local, quotas gratuits configurés, catalogue Anthropic).
+  const models = await syncModelRegistry();
   await db.transaction(async (tx) => {
-    for (const m of MODEL_SEEDS) {
-      const v = { provider: "anthropic", displayName: m.displayName, tier: m.tier, inputPerMtok: String(m.inputPerMtok), outputPerMtok: String(m.outputPerMtok),
-        cacheReadPerMtok: m.cacheReadPerMtok === null ? null : String(m.cacheReadPerMtok), cacheWritePerMtok: m.cacheWritePerMtok === null ? null : String(m.cacheWritePerMtok),
-        contextWindow: m.contextWindow, maxOutput: m.maxOutput, capabilities: m.capabilities, limits: m.limits, pricingSource: PRICING_SOURCE, pricingVerifiedAt: PRICING_VERIFIED_AT, updatedAt: new Date() };
-      await tx.insert(schema.modelDefinitions).values({ id: m.id, ...v }).onConflictDoUpdate({ target: schema.modelDefinitions.id, set: v });
-      await upsertEntityNode(tx, { ownerId, type: "Model", label: m.displayName, refTable: "model_definitions", refId: m.id, properties: { tier: m.tier }, sensitivity: "public" });
-    }
     for (const a of AGENTS) {
       // Les champs réglables par l'utilisateur (modèle, budget, activation) ne sont pas écrasés.
       await tx.insert(schema.agentDefinitions).values({ id: a.id, name: a.name, title: a.title, mission: a.mission, description: a.description, systemPrompt: a.systemPrompt,
@@ -33,6 +28,9 @@ export async function syncRegistries(ownerId: string) {
       await tx.insert(schema.automations).values({ ownerId, key: s.key, name: s.name, description: s.description, cron: s.cron, requiresLlm: s.requiresLlm, config: s.key === "partnership_followup" ? { days: 10 } : {} })
         .onConflictDoUpdate({ target: [schema.automations.ownerId, schema.automations.key], set: { name: s.name, description: s.description, requiresLlm: s.requiresLlm } });
     }
+    for (const m of await tx.select().from(schema.modelDefinitions))
+      await upsertEntityNode(tx, { ownerId, type: "Model", label: m.displayName, refTable: "model_definitions", refId: m.id, properties: { costClass: m.costClass, quality: m.qualityTier, availability: m.availability }, sensitivity: "public" });
     await tx.execute(sql`SELECT 1`);
   });
+  return models;
 }

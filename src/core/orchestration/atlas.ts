@@ -51,12 +51,13 @@ export async function handleMessage(ownerId: string, text: string, opts: { conve
   if (!det.needsLlm) {
     await addStep(runId, { kind: "model_select", agentId: "token_master", summary: "Aucun modèle IA nécessaire : traitement déterministe (0 $)" });
     result = { ...det, mode: "deterministic" };
-  } else if (llmAvailable()) {
-    const llm = await runAgentLLM({ ownerId, agentId: r.agentId, objective: clean, profile: r.profile, conversationId, history, runId, rootRunId: root.id, depth: runId === root.id ? 0 : 1 });
-    result = { reply: llm.reply, sources: llm.sources, status: llm.status, mode: "llm" };
   } else {
-    await addStep(runId, { kind: "model_select", agentId: "token_master", summary: "ANTHROPIC_API_KEY absent : mode dégradé (recherche dans le cerveau)" });
-    result = { ...(await brainSearch(ownerId, runId, clean)), mode: "brain_search" };
+    const llm = (await llmAvailable(ownerId)) ? await runAgentLLM({ ownerId, agentId: r.agentId, objective: clean, profile: r.profile, conversationId, history, runId, rootRunId: root.id, depth: runId === root.id ? 0 : 1 }) : null;
+    if (llm && llm.error !== "no_model") result = { reply: llm.reply, sources: llm.sources, status: llm.status, mode: "llm" };
+    else {
+      await addStep(runId, { kind: "model_select", agentId: "token_master", summary: "Aucun modèle autorisé disponible (Ollama arrêté, aucune clé gratuite) : recherche dans le cerveau" });
+      result = { ...(await brainSearch(ownerId, runId, clean)), mode: "brain_search" };
+    }
   }
 
   // SENTINEL : bilan de contrôle de l'exécution
@@ -85,13 +86,13 @@ export async function brainSearch(ownerId: string, runId: string, query: string)
   ]);
   await addStep(runId, { kind: "context", agentId: "atlas", summary: `Recherche cerveau : ${mem.length} souvenir(s), ${docs.length} passage(s), ${nodes.length} nœud(s)` });
   const lines = [
-    "_Mode dégradé : aucune clé API configurée pour LOÏC OS. Voici ce que contient votre cerveau sur ce sujet (aucun texte généré) :_", "",
+    "_Mode dégradé : aucun modèle IA disponible. Voici ce que contient votre cerveau sur ce sujet (aucun texte généré) :_", "",
   ];
   if (mem.length) lines.push("**Mémoire**", ...mem.map((m) => `- ${m.content} _(${m.category}, observé ${m.observedAt}, ${m.confidenceStatus})_`), "");
   if (docs.length) lines.push("**Documents**", ...docs.map((d) => `- **${d.title}**${d.page ? ` p.${d.page}` : ""} — ${d.excerpt}`), "");
   if (nodes.length) lines.push("**Graphe**", ...nodes.map((n) => `- ${n.type} : ${n.label}`), "");
   if (!mem.length && !docs.length && !nodes.length) lines.push("Rien de pertinent dans la mémoire, les documents ou le graphe.");
-  lines.push("Pour une réponse rédigée, ajoutez `ANTHROPIC_API_KEY` (facturation API distincte de l'abonnement Claude) — voir README.");
+  lines.push("Pour une réponse rédigée gratuite : lancez Ollama avec un modèle local (voir README → IA gratuite).");
   return { reply: lines.join("\n"), status: "completed",
     sources: [...mem.map((m) => ({ kind: "memory", label: m.content.slice(0, 60), ref: m.id })), ...docs.map((d) => ({ kind: "document", label: d.title, ref: d.documentId }))] };
 }

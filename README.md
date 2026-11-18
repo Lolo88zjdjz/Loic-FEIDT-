@@ -3,6 +3,8 @@
 Second Brain personnel multi-agents : mémoire persistante, graphe de connaissances interactif (Neural Brain), 16 agents orchestrés par ATLAS, CRM, projets, Knowledge Vault, automatisations planifiées, contrôle des coûts IA (TOKEN MASTER) et inventaire vérifié des extensions (PLUGIN ARCHITECT).
 
 > État réel, fonctionnalité par fonctionnalité : **[IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md)**.
+>
+> **Aucune dépense API obligatoire** : par défaut, LOÏC OS n'utilise que des modèles gratuits (Ollama local, quotas gratuits). Anthropic est facultatif et bloqué tant que vous ne l'autorisez pas explicitement.
 
 ## Stack
 
@@ -12,7 +14,7 @@ Second Brain personnel multi-agents : mémoire persistante, graphe de connaissan
 | Données | PostgreSQL 16 + Drizzle ORM + pgvector + pg_trgm | Une seule base pour relationnel, graphe, plein texte, vecteurs, file de tâches |
 | File / planificateur | pg-boss 12 (dans PostgreSQL) | Durable, sans Redis ; reprise après arrêt |
 | Graphe (UI) | Cytoscape.js + fcose | Rendu canvas fluide jusqu'à quelques milliers de nœuds |
-| IA | `@anthropic-ai/sdk` (Messages API, boucle d'outils maison) | Chaque appel d'outil passe par SENTINEL et est journalisé |
+| IA | Abstraction multi-fournisseurs : **Ollama** (local, défaut), API compatibles OpenAI à quota gratuit, `@anthropic-ai/sdk` (facultatif) | 0 $ par défaut ; chaque appel d'outil passe par SENTINEL |
 | Validation | Zod 4 | Entrées API, formulaires et sorties LLM |
 
 ## Installation
@@ -43,6 +45,35 @@ Migrations + données initiales (profil, projets, CRM, graphe, agents, modèles,
 pnpm db:migrate && pnpm db:seed
 ```
 
+## IA gratuite (recommandé)
+
+1. Installez Ollama : https://ollama.com/download (macOS, Windows, Linux) — ou `docker compose up -d ollama`.
+2. Téléchargez un modèle adapté à votre machine (Settings affiche une recommandation selon votre RAM) :
+
+```bash
+ollama pull qwen2.5:3b        # 8–16 Go de RAM : bon compromis (≈ 2 Go)
+```
+
+```bash
+ollama pull qwen2.5:7b        # 16 Go+ : meilleure rédaction, plus lent sans GPU
+```
+
+3. Détectez les modèles : Settings → « Détecter les modèles disponibles », ou :
+
+```bash
+pnpm llm:sync
+```
+
+4. Facultatif : mesurez leurs capacités réelles sur votre machine.
+
+```bash
+pnpm llm:eval                 # écrit docs/FREE_MODELS_REPORT.md
+```
+
+Sans accès au registre Ollama, un fichier `.gguf` local s'importe avec `./scripts/import-gguf.sh fichier.gguf nom:tag`.
+
+Quotas gratuits facultatifs : renseignez `GEMINI_API_KEY`, `GROQ_API_KEY`, `OPENROUTER_API_KEY` ou `MISTRAL_API_KEY` dans `.env` (conditions de données des offres gratuites à vérifier chez chaque fournisseur ; éviter les données sensibles).
+
 ## Lancement
 
 ```bash
@@ -63,7 +94,9 @@ Connexion : `LOIC_OS_OWNER_EMAIL` / `LOIC_OS_OWNER_PASSWORD` définis dans `.env
 | `TEST_DATABASE_URL` | tests | Base dédiée aux tests (réinitialisée à chaque `pnpm test`) |
 | `SESSION_SECRET` | oui | ≥ 32 caractères ; dérive aussi la clé AES-256-GCM des jetons OAuth |
 | `LOIC_OS_OWNER_EMAIL` / `LOIC_OS_OWNER_PASSWORD` | seed | Compte propriétaire initial |
-| `ANTHROPIC_API_KEY` | non | Active le mode LLM (demandes ouvertes, rédaction, recherche web). **Facturation API à l'usage, distincte d'un abonnement Claude ou de Claude Code.** Sans clé : mode déterministe (0 $). |
+| `OLLAMA_BASE_URL` | non | Ollama local (défaut `http://127.0.0.1:11434`) — IA gratuite |
+| `GEMINI_API_KEY`, `GROQ_API_KEY`, `OPENROUTER_API_KEY`, `MISTRAL_API_KEY` | non | Quotas gratuits facultatifs |
+| `LOIC_OS_ANTHROPIC_API_KEY` | non | Anthropic, **payant**, facultatif ; utilisé seulement si Settings → Politique = « payant autorisé ». Distinct de l'abonnement Claude Code (les variables `ANTHROPIC_*` de Claude Code sont ignorées). |
 | `LOIC_OS_REFUSAL_FALLBACK` | non | `1` (défaut) : repli serveur en cas de refus (beta `server-side-fallback-2026-07-01`) |
 | `VOYAGE_API_KEY` | non | Réservé aux embeddings (intégration non implémentée) |
 | `GOOGLE_CLIENT_ID` / `SECRET` | non | Réservé à Gmail/Calendar/Drive (non implémenté) |
@@ -81,6 +114,10 @@ pnpm test            # unitaires + intégration (base de test réelle, aucun app
 
 ```bash
 pnpm test:e2e        # navigateur réel (Playwright) — l'app doit tourner sur :3000
+```
+
+```bash
+OLLAMA_DISABLED=0 pnpm vitest run tests/integration/ollama.test.ts   # intégration réelle avec un modèle local
 ```
 
 ```bash

@@ -13,7 +13,7 @@ const NAV = [
   ["/activity", "Activity", Activity], ["/health", "System Health", HeartPulse], ["/settings", "Settings", Settings],
 ] as const;
 
-export function Sidebar({ pending, llm }: { pending: number; llm: boolean }) {
+export function Sidebar({ pending, llm, label }: { pending: number; llm: boolean; label: string }) {
   const path = usePathname();
   const [open, setOpen] = useState(false);
   const toggleTheme = () => {
@@ -43,7 +43,7 @@ export function Sidebar({ pending, llm }: { pending: number; llm: boolean }) {
           })}
         </nav>
         <div className="p-3 border-t border-line space-y-2 text-[12px]">
-          <div className="flex items-center gap-2 text-muted"><span className={`size-1.5 rounded-full ${llm ? "bg-ok" : "bg-warn"}`} />{llm ? "IA : clé API configurée" : "IA : mode déterministe"}</div>
+          <div className="flex items-center gap-2 text-muted"><span className={`size-1.5 rounded-full ${llm ? "bg-ok" : "bg-warn"}`} />{label}</div>
           <div className="flex gap-2">
             <button onClick={toggleTheme} className="btn flex-1 justify-center" aria-label="Thème"><Sun size={14} className="hidden dark:block" /><Moon size={14} className="dark:hidden" /></button>
             <form action="/api/logout" method="post" className="flex-1"><button className="btn w-full justify-center">Déconnexion</button></form>

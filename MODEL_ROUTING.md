@@ -1,43 +1,53 @@
-# TOKEN MASTER — routage des modèles
+# TOKEN MASTER — fournisseurs, coûts et routage
 
-TOKEN MASTER pilote **les modèles appelés par LOÏC OS via l'API Anthropic**. Il ne modifie pas le modèle de la session Claude Code de développement (réglage officiel : `/model` ou les paramètres de Claude Code).
+## Principe : 100 % gratuit par défaut
 
-## Registre (`model_definitions`)
+| Classe | Fournisseurs | Coût | Activation |
+|---|---|---|---|
+| `local` | **Ollama** (modèles sur votre machine) | 0 $ — données locales | Ollama lancé + au moins un modèle |
+| `free_quota` | Gemini, Groq, OpenRouter (`:free` uniquement), Mistral — API compatibles OpenAI | 0 $ dans la limite du quota ; au-delà : erreur 429, **jamais** de facturation ni de repli payant | Clé du fournisseur dans `.env` |
+| `paid` | **Anthropic** (facultatif) | Facturé à l'usage | `LOIC_OS_ANTHROPIC_API_KEY` **et** politique « payant autorisé » (avec confirmation explicite) |
 
-| Modèle | Niveau | $/M entrée | $/M sortie | $/M cache lu | Usage cible |
-|---|---|---|---|---|---|
-| `claude-haiku-5-5` | fast | 0,10 | 0,50 | 0,01* | classification, extraction, résumé court, NUTRI/FLOW/SENTINEL |
-| `claude-sonnet-5-5` | balanced | 2 | 10 | 0,10 | rédaction, recherche, analyse, la plupart des agents |
-| `claude-opus-5-5` | advanced | 4 | 20 | 0,20 | stratégie (ORACLE), tâches complexes ou à risque |
-| `claude-fable-5-2` | premium | 8 | 40 | 0,20 | jamais automatique : sélection manuelle uniquement |
+**Politique de coût** (`ai.cost_policy`, Settings) : `free_only` par défaut. Garde-fou central `assertCallAllowed` dans `callModel` (`src/core/llm/registry.ts`) : **tout** appel de modèle y passe ; un modèle payant est refusé (erreur 402) tant que la politique est gratuite. Testé unitairement et en intégration (même avec la politique « payant autorisé », sans clé dédiée : aucun appel payant).
 
-Source : référence Claude API intégrée à l'environnement de développement (cache du 2026-11-03). *Lecture cache Haiku dérivée de la règle documentée 0,1 × entrée. Écriture cache = 1,25 × entrée. Haiku : tarif doublé au-delà de 100K tokens de prompt. **Disponibilité « unverified »** tant que `GET /v1/models` n'a pas réussi avec la clé de l'application (Settings → Vérifier).
+## Séparation Claude Code ↔ LOÏC OS
 
-## Algorithme (`chooseModel`)
+L'abonnement Claude Code sert à **développer** LOÏC OS ; il n'est jamais utilisé par l'application. Le fournisseur Anthropic de LOÏC OS :
+- lit uniquement `LOIC_OS_ANTHROPIC_API_KEY` ;
+- impose `baseURL = https://api.anthropic.com` et `authToken = null` ;
+- ignore donc `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL` (présentes dans les environnements Claude Code). Test : `séparation Claude Code` dans `tests/unit/pure.test.ts`.
 
-1. Modèle imposé dans l'Agent Hub → utilisé tel quel.
-2. Sinon niveau de l'agent ; risque élevé ou complexité élevée ⇒ **avancé directement** (pas d'escalade par essais) ; tâche simple ⇒ un niveau en dessous.
-3. Recherche web ⇒ au moins Sonnet (outil `web_search_20260209` documenté pour Sonnet/Opus 5.5).
-4. Mode : ECO descend d'un niveau (si risque faible), MAX PERFORMANCE monte d'un niveau.
-5. Modèle marqué indisponible ⇒ bascule au niveau supérieur, sinon inférieur.
-6. Effort (`output_config.effort`) : fast→low, balanced→medium, advanced→high ; ECO l'abaisse, MAX l'élève. (La réflexion ne peut pas être désactivée sur Opus/Sonnet 5.5 : l'effort est le levier.)
-7. La justification complète est enregistrée (`agent_runs.model_reason`) et affichée dans les étapes d'exécution.
+TOKEN MASTER ne pilote que les modèles de l'application, jamais celui de la session Claude Code (`/model` dans Claude Code).
 
-**Escalade** : une seule fois, uniquement sur critère vérifiable (réponse tronquée `max_tokens` au premier tour).
+## Abstraction (`src/core/llm/`)
 
-## Optimisations implémentées
+`LlmProvider { id, costClass, isConfigured(), discover(), chat() }` avec un format neutre (messages, outils JSON Schema, appels d'outils, usage). Ajouter un fournisseur = une classe ; ajouter un service compatible OpenAI = une entrée dans `FREE_PRESETS`.
 
-- Routage déterministe : intentions reconnues traitées **sans aucun appel IA** (0 $).
-- Préfixe système stable (règles + prompt d'agent) avec `cache_control` ; outils triés de façon déterministe ; la date et le contexte variable sont dans le message utilisateur (après le préfixe).
-- Contexte mémoire ciblé (≤ 8 souvenirs, filtrés par catégorie et sensibilité de l'agent), historique limité aux 6 derniers messages.
-- Sorties d'outils compressées (≤ 6 000 caractères), recherche web limitée (`max_uses: 3`).
-- Plafonds : étapes par agent, 12 appels d'outils par run, 3 délégations, profondeur 2, 120 s, budget par agent, budgets jour/mois (blocage avant appel).
-- Repli serveur en cas de refus (`fallbacks: "default"`, beta `server-side-fallback-2026-07-01`) sur Opus/Sonnet 5.5 — désactivable (`LOIC_OS_REFUSAL_FALLBACK=0`).
+**Découverte réelle** (`syncModelRegistry`, au seed, via Settings → « Détecter les modèles », `pnpm llm:sync`, et chaque nuit dans « Santé du système ») : Ollama `/api/tags` + `/api/show` (capacités `tools`, contexte), `/models` des fournisseurs à quota configurés (OpenRouter : seuls les modèles à prix 0), catalogue Anthropic documenté. Un modèle absent devient `unavailable`.
 
-## Mesure des coûts
+**Niveau de capacité (1–5)** : local = estimé d'après la taille (< 2B → 1, < 5B → 2, < 20B → 3, sinon 4) ; Anthropic = gamme (Haiku 3, Sonnet 4, Opus/Fable 5). Toujours affiché avec sa justification, jamais présenté comme un benchmark ; les mesures réelles (latence, débit, taux de succès) sont affichées à côté dans l'AI Cost Center.
 
-`model_usage` enregistre par appel : tokens entrée / sortie / cache lu / cache écrit (renvoyés par l'API), modèle réellement servi, latence, statut, tentative. Coût = tokens × tarifs du registre ; `cost_status = partial` si un tarif manque. Aucune économie n'est affichée sans mesure.
+## Sélection (`selectModel`)
 
-## À distinguer
+1. Exigences de la tâche : niveau minimal (niveau de l'agent ±1 selon complexité, risque, mode ECO/MAX), outils, recherche web, contexte.
+2. Candidats = modèles activés, disponibles, d'un fournisseur configuré **et autorisés par la politique**.
+3. Parmi ceux qui satisfont tout : **le moins coûteux** ; à coût égal (0 $), local d'abord (confidentialité, pas de quota), puis le **plus petit modèle suffisant** (plus rapide).
+4. Si aucun ne satisfait tout : meilleur compromis autorisé, **exigences non satisfaites déclarées** dans la réponse (ex. « aucune recherche web effectuée »), et mention qu'un modèle payant conviendrait mais est bloqué. Jamais de bascule implicite vers un modèle payant.
+5. Repli en cas d'erreur (Ollama arrêté, quota 429) : prochain candidat **autorisé**, une fois. Aucun modèle disponible ⇒ « Ask My Brain » sans génération.
+6. Justification complète enregistrée (`agent_runs.model_reason`) et visible dans les étapes d'exécution.
 
-Abonnement Claude (claude.ai) ≠ usage Claude Code ≠ **facturation API** (clé de LOÏC OS, à l'usage) ≠ hébergement ≠ services tiers (Voyage, Google…). Un abonnement n'inclut pas d'accès API illimité.
+## Adaptations aux petits modèles locaux
+
+- Consignes renforcées (« si tu n'es pas certain, dis-le », « n'invente aucune personne ou organisation »), historique réduit (2 messages), sorties d'outils plus courtes, descriptions d'outils abrégées, **délégation désactivée** (un modèle de niveau ≤ 2 s'y perd).
+- Mode « réflexion » (Qwen3) désactivé par défaut (`OLLAMA_THINK=1` pour l'activer).
+- **SENTINEL après coup** : réponse sans aucune donnée (ni souvenir, ni outil, ni web) ⇒ étiquetée « non sourcée — supposition du modèle ».
+- **Neutralisation des injections** connues dans tout contenu externe avant envoi au modèle (mesure : sans elle, les deux modèles testés obéissent à « IGNORE ALL PREVIOUS INSTRUCTIONS »).
+- Chaque réponse locale porte la mention « générée localement par … (gratuit, niveau N) : vérifiez les faits importants ».
+
+## Coûts
+
+`model_usage` : tokens mesurés (Ollama : `prompt_eval_count` / `eval_count`), latence, `cost_status` = `free_local` | `free_quota` | `computed` | `partial`. Les budgets jour/mois ne concernent que les modèles payants.
+
+## Résultats mesurés
+
+Voir **[docs/FREE_MODELS_REPORT.md](docs/FREE_MODELS_REPORT.md)** (régénéré par `pnpm llm:eval`).

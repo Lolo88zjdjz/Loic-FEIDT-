@@ -16,7 +16,9 @@
     "worker": "tsx worker/index.ts",
     "backup": "bash scripts/backup.sh",
     "test": "vitest run",
-    "test:e2e": "node tests/e2e/run.mjs"
+    "test:e2e": "node tests/e2e/run.mjs",
+    "llm:eval": "tsx scripts/llm-eval.ts",
+    "llm:sync": "tsx scripts/llm-sync.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^1.10.0",

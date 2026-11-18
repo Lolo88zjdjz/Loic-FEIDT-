@@ -35,3 +35,7 @@ Les **règles de sécurité** (`SECURITY_RULES`) sont ajoutées par le moteur à
 | 2 Analyse | graph_paths, crm_stale, costs_report, web_search (serveur Anthropic) |
 | 3 Modification interne | memory_create, task_create, crm_add_organization, crm_move_opportunity, nutrition_log, draft_email (crée une approbation, n'envoie rien) |
 | 4 Action externe | email_send (toujours approbation ; Gmail non connecté ⇒ échec honnête) |
+
+## v0.2 — exécution gratuite
+
+Avec Ollama, tous les agents s'exécutent en mode LLM **sans coût** (modèle local choisi par TOKEN MASTER). Ce qui reste indisponible en mode gratuit : la **recherche web** (ATHENA, veille stages de NEXUS, recherche de nouveaux outils par PLUGIN ARCHITECT) et la **délégation** entre agents quand le modèle local est de niveau ≤ 2. La qualité rédactionnelle et analytique dépend de la taille du modèle local : voir [docs/FREE_MODELS_REPORT.md](docs/FREE_MODELS_REPORT.md).

@@ -467,6 +467,16 @@ export const modelDefinitions = pgTable("model_definitions", {
   provider: text("provider").notNull(),
   displayName: text("display_name").notNull(),
   tier: text("tier").notNull(), // fast | balanced | advanced | premium
+  /** local (0 $, sur votre machine) | free_quota (0 $ dans la limite d'un quota) | paid (facturé à l'usage) */
+  costClass: text("cost_class").notNull().default("paid"),
+  /** Niveau de capacité 1 (très limité) → 5 (frontière). Toujours accompagné de sa justification. */
+  qualityTier: integer("quality_tier").notNull().default(3),
+  qualityBasis: text("quality_basis"),
+  supportsTools: boolean("supports_tools").notNull().default(false),
+  supportsWebSearch: boolean("supports_web_search").notNull().default(false),
+  parameterSize: text("parameter_size"),
+  freeLimits: text("free_limits"),
+  enabled: boolean("enabled").notNull().default(true),
   inputPerMtok: numeric("input_per_mtok", { precision: 10, scale: 4 }),
   outputPerMtok: numeric("output_per_mtok", { precision: 10, scale: 4 }),
   cacheReadPerMtok: numeric("cache_read_per_mtok", { precision: 10, scale: 4 }),

@@ -16,7 +16,7 @@ import { runPluginAudit } from "../plugins/audit";
 
 export const AUTOMATION_SEEDS = [
   { key: "daily_briefing", name: "Briefing quotidien", cron: "30 7 * * *", requiresLlm: false, description: "Événements, tâches, échéances, projets et priorités du jour (assemblé depuis vos données)." },
-  { key: "internship_watch", name: "Veille stages", cron: "0 9 * * 1,4", requiresLlm: true, description: "Recherche d'offres (web), comparaison aux critères, déduplication, enregistrement et notification. Nécessite ANTHROPIC_API_KEY." },
+  { key: "internship_watch", name: "Veille stages", cron: "0 9 * * 1,4", requiresLlm: true, description: "Recherche d'offres (web), comparaison aux critères, déduplication, enregistrement et notification. Nécessite un modèle avec recherche web (Anthropic, payant et facultatif) : indisponible en mode 100 % gratuit." },
   { key: "partnership_followup", name: "Suivi partenariats", cron: "0 18 * * 1-5", requiresLlm: false, description: "Repère les discussions sans réponse et propose des relances (brouillons uniquement, aucun envoi)." },
   { key: "revision_plan", name: "Révisions", cron: "0 19 * * 0", requiresLlm: false, description: "Examens à venir, cours prioritaires, planning proposé. La génération d'exercices nécessite une clé API." },
   { key: "weekly_review", name: "Weekly Review", cron: "0 20 * * 0", requiresLlm: false, description: "Réalisations, retards, priorités et échéances de la semaine." },
@@ -36,7 +36,11 @@ const handlers: Record<string, Handler> = {
     return { title: `Briefing du ${fmt(new Date())}`, body: r.reply, output: { runId: run.id } };
   },
   async internship_watch(a) {
-    if (!llmAvailable()) return { title: "Veille stages non exécutée", body: "Bloquée : la recherche d'offres réelles nécessite ANTHROPIC_API_KEY (outil web_search). Aucune offre n'est inventée.", output: {}, skipped: "no_api_key" };
+    const { modelCandidates } = await import("../model-router/router");
+    const { getCostPolicy } = await import("../llm/registry");
+    const policy = await getCostPolicy(a.ownerId);
+    const web = (await modelCandidates()).some((c) => c.supportsWebSearch && c.availability !== "unavailable" && c.enabled && (c.costClass !== "paid" || policy === "allow_paid"));
+    if (!web) return { title: "Veille stages non exécutée", body: "Bloquée : la recherche d'offres réelles nécessite un modèle avec recherche web. Aucun modèle gratuit disponible n'en dispose (Anthropic est payant et désactivé par la politique 100 % gratuit). Aucune offre n'est inventée.", output: {}, skipped: "no_web_model" };
     const r = await runAgentLLM({ ownerId: a.ownerId, agentId: "nexus", objective: "Recherche sur le web des offres de stage récentes (4 à 5 mois, début printemps 2027, Paris en priorité) en sales, wholesale, business development, e-commerce, retail ou partenariats, idéalement dans le sport, l'outdoor, le luxe ou les marques premium. Pour chaque offre : entreprise, intitulé, lieu, dates, URL, date de publication. Ne liste que des offres trouvées.", profile: { complexity: "medium", risk: "low", needsWeb: true } });
     return { title: "Veille stages", body: r.reply, output: { runId: r.runId, status: r.status } };
   },
@@ -54,7 +58,7 @@ const handlers: Record<string, Handler> = {
     const body = exams.length
       ? ["Examens à venir :", ...exams.map((e) => { const d = Math.ceil((e.startsAt.getTime() - Date.now()) / 86400_000); return `- ${fmt(e.startsAt)} — ${e.title} (J-${d}) : ${d <= 7 ? "révision intensive" : d <= 21 ? "2 séances/semaine" : "1 séance/semaine"}`; }),
         "", docs.length ? `${docs.length} document(s) de cours disponibles dans le Vault.` : "Aucun cours importé : importez vos supports dans le Knowledge Vault.",
-        llmAvailable() ? "" : "Génération d'exercices : nécessite ANTHROPIC_API_KEY."].filter(Boolean).join("\n")
+        (await llmAvailable(a.ownerId)) ? "Génération d'exercices : demandez-la à SCHOLAR dans le Command Center (modèle gratuit)." : "Génération d'exercices : nécessite un modèle IA (Ollama local gratuit recommandé)."].filter(Boolean).join("\n")
       : "Aucun examen enregistré dans le calendrier. Ajoutez vos dates d'examens (titre contenant « examen » ou « partiel »).";
     return { title: "Plan de révisions", body, output: { exams: exams.length } };
   },

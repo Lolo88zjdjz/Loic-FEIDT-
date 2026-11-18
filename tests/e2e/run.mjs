@@ -29,7 +29,7 @@ async function chat(text) {
   const before = await page.getByTestId("assistant-message").count();
   await page.getByTestId("chat-input").fill(text);
   await page.getByTestId("chat-send").click();
-  await page.waitForFunction((n) => document.querySelectorAll('[data-testid="assistant-message"]').length > n, before, { timeout: 30000 });
+  await page.waitForFunction((n) => document.querySelectorAll('[data-testid="assistant-message"]').length > n, before, { timeout: 240000 });
   return page.getByTestId("assistant-message").last().innerText();
 }
 
@@ -68,6 +68,11 @@ await step("Ask My Brain — dossier Peak Performance (sources, données histori
 await step("20. Comprendre pourquoi un modèle a été choisi (étapes d'exécution)", async () => {
   await page.getByText("Étapes d'exécution").last().click(); await expectText("Aucun modèle IA nécessaire");
   await page.screenshot({ path: `${SHOTS}/command-center.png` });
+});
+await step("IA gratuite — demande ouverte traitée par un modèle local (0 $)", async () => {
+  const r = await chat("Résume en deux phrases mon projet Altigliss.");
+  if (!/localement par .*gratuit/.test(r)) throw new Error(r.slice(0, 300));
+  console.log("   réponse :", r.split("\n")[0].slice(0, 200));
 });
 await step("Scénario B — relance en brouillon, en attente de validation", async () => {
   const r = await chat("Prépare une relance pour Pierre Lannier");
@@ -108,6 +113,14 @@ await step("15. Consulter l'historique des agents", async () => {
   await page.goto(BASE + "/agents"); await expectText("tests routage");
 });
 await step("16. Voir les coûts réels", async () => { await page.goto(BASE + "/costs"); await expectText("Registre des modèles"); await expectText("claude-sonnet-5-5"); });
+await step("Cost Center — modèles gratuits et leurs limites affichés", async () => {
+  await page.goto(BASE + "/costs"); await expectText("Modèles disponibles et leurs limites"); await expectText("local · 0 $"); await expectText("bloqué (politique)");
+  await page.screenshot({ path: `${SHOTS}/cost-center.png`, fullPage: true });
+});
+await step("Settings — politique « 100 % gratuit » par défaut + séparation Claude Code", async () => {
+  await page.goto(BASE + "/settings"); if (!(await page.getByTestId("policy-free").isChecked())) throw new Error("politique non gratuite par défaut");
+  await expectText("Séparation stricte"); await page.screenshot({ path: `${SHOTS}/settings-ai.png`, fullPage: true });
+});
 await step("17. Modifier des préférences (mode ECO)", async () => {
   await page.goto(BASE + "/settings"); await page.getByTestId("mode-select").selectOption("ECO"); await page.getByTestId("save-ai").click();
   await page.waitForTimeout(800); await page.reload(); if ((await page.getByTestId("mode-select").inputValue()) !== "ECO") throw new Error("non persisté");

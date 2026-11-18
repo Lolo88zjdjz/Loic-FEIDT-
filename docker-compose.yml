@@ -1,0 +1,21 @@
+# Services d'infrastructure de LOÏC OS (l'application et le worker se lancent avec pnpm).
+#   docker compose up -d
+#   docker compose exec ollama ollama pull qwen2.5:3b
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: loic
+      POSTGRES_PASSWORD: loic_dev_password
+      POSTGRES_DB: loic_os
+    ports: ["127.0.0.1:5432:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+  ollama:
+    image: ollama/ollama:latest
+    ports: ["127.0.0.1:11434:11434"]
+    volumes: [ollama:/root/.ollama]
+    # GPU NVIDIA (facultatif) : décommentez
+    # deploy: { resources: { reservations: { devices: [{ driver: nvidia, count: all, capabilities: [gpu] }] } } }
+volumes:
+  pgdata: {}
+  ollama: {}

@@ -7,7 +7,8 @@ import { db, schema } from "@/core/db/client";
 import { AGENTS, SECURITY_RULES } from "@/core/agents/definitions";
 import { TOOL_MAP } from "@/core/agents/tools";
 import { route } from "@/core/orchestration/intent";
-import { chooseModel } from "@/core/model-router/router";
+import { modelCandidates, requirementsFor, selectModel } from "@/core/model-router/router";
+import { getCostPolicy, providerById } from "@/core/llm/registry";
 import { PERMISSION_LABELS } from "@/core/security/permissions";
 import { audit } from "@/core/security/audit";
 import { createMemory } from "@/core/memory/service";
@@ -42,7 +43,9 @@ export default async function AgentPage({ params }: { params: Promise<{ id: stri
   const runs = await db.select().from(schema.agentRuns).where(and(eq(schema.agentRuns.ownerId, user.id), eq(schema.agentRuns.agentId, id))).orderBy(desc(schema.agentRuns.createdAt)).limit(20);
   const feedback = await db.select().from(schema.agentFeedback).where(and(eq(schema.agentFeedback.ownerId, user.id), eq(schema.agentFeedback.agentId, id))).orderBy(desc(schema.agentFeedback.createdAt)).limit(10);
   const models = await db.select().from(schema.modelDefinitions);
-  const example = chooseModel({ agentTier: a.modelTier as "fast", profile: { complexity: "medium", risk: "low" }, mode: "BALANCED", override: a.modelOverride });
+  const policy = await getCostPolicy(user.id);
+  const ex = selectModel((await modelCandidates()).filter((c) => providerById(c.provider)?.isConfigured() || c.costClass === "paid"), requirementsFor(a.modelTier as "fast", { complexity: "medium", risk: "low" }, "BALANCED"), { policy, mode: "BALANCED", override: a.modelOverride, preferLocal: true });
+  const example = "none" in ex ? { modelId: "aucun modèle autorisé", reason: ex.reason } : ex;
   return (
     <>
       <PageHeader title={`${a.name} — ${a.title}`} subtitle={a.description} />
@@ -60,7 +63,7 @@ export default async function AgentPage({ params }: { params: Promise<{ id: stri
           <form action={updateAgent} className="space-y-3 text-[13px]">
             <input type="hidden" name="id" value={a.id} />
             <label className="block"><span className="text-muted text-[12px]">Modèle</span>
-              <select name="modelOverride" defaultValue={a.modelOverride ?? ""} className="input mt-1"><option value="">Automatique (TOKEN MASTER, niveau {a.modelTier})</option>{models.map((m) => <option key={m.id} value={m.id}>{m.displayName} ({m.availability})</option>)}</select></label>
+              <select name="modelOverride" defaultValue={a.modelOverride ?? ""} className="input mt-1"><option value="">Automatique (TOKEN MASTER, niveau {a.modelTier})</option>{models.map((m) => <option key={m.id} value={m.id}>{m.displayName} ({m.costClass === "paid" ? "payant" : "gratuit"}, {m.availability})</option>)}</select></label>
             <label className="block"><span className="text-muted text-[12px]">Budget max par mission (USD)</span><input name="maxCostUsd" type="number" step="0.01" defaultValue={a.maxCostUsd} className="input mt-1" /></label>
             <label className="flex items-center gap-2"><input type="checkbox" name="enabled" defaultChecked={a.enabled} disabled={a.id === "atlas"} /> Agent activé</label>
             <button className="btn btn-primary">Enregistrer</button>
